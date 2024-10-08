@@ -97,7 +97,7 @@ extract_significat_cols <- function(fit, alpha=.05){
 
 ## analysis
 train_size <- 400
-train_idx <- sample(1:nrow(diabetes), train_size)
+train_idx <- sample(1:nrow(diabetes), train_size) # nolint: seq_linter.
 y_list <- train_test_split(diabetes$y, train_idx)
 x_list <- train_test_split(diabetes$x, train_idx)
 

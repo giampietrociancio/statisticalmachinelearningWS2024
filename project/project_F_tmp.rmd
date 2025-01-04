@@ -1,0 +1,414 @@
+---
+title: "Pokemon Project"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(caret)
+library(kableExtra)
+library(corrplot)
+library(MLmetrics)
+```
+
+## Data
+--- add description here
+
+## Feature extraction
+Import the df and visualize the columns' name.
+```{r}
+df <- read.csv("data.csv")
+names(df)
+```
+Drop useless columns X., Name.
+
+```{r}
+df <- df |>
+    mutate(Legendary = as.integer(as.logical(Legendary))) |>
+    select(-X., -Name)
+```
+Check that Tot is just a linear combination of other columns. If yes, drop it.
+```{r}
+if (all((df$HP + df$Attack + df$Defense + df$SP..Attack + df$SP..Defense + df$Speed) == df$Total)) {
+    df <- df |> select(-Total)
+}
+```
+
+One-hot encoding from Type.1 and Type.2.
+
+```{r}
+unique_types <- c(df$Type.1, df$Type.2) |> unique()
+
+for (typ in unique_types[-1]) {
+    if (typ == "") next
+    df[typ] <- 0
+    for (row in 1:nrow(df)) {
+        has_type <- typ %in% df[row, c("Type.1", "Type.2")]
+        if (has_type) {
+            df[row, typ] <- 1
+        }
+    }
+}
+```
+
+```{r}
+for (i in unique(df$Generation)) {
+    #if (i == 1) next
+    col_name <- paste0("gen_", i)
+    df[col_name] <- 0
+}
+
+for (row in 1:nrow(df)) {
+    gen <- df[row, "Generation"]
+    #if (gen == 1) next
+    col_name <- paste0("gen_", gen)
+    df[row, col_name] <- 1
+}
+```
+
+Drop the categorical columns that we don't need anymore and set Legendary to factor.
+```{r}
+df <- df |>
+    select(-Type.1, -Type.2, -Generation) |>
+    mutate(Legendary = as.factor(ifelse(Legendary == 0, "No", "Yes")))
+```
+
+```{r}
+colnames(df)[c(1, 4, 5)] <- c("Hit_Point", "Special_Attack", "Special_Defense")
+```
+
+```{r}
+set.seed(123)
+train_test_split <- function(df, perc_train = 0.7) {
+    i_train <- sample(1:nrow(df), floor(0.7 * nrow(df)), F)
+    list_out <- list(train = df[i_train, ], test = df[-i_train, ])
+    return(list_out)
+}
+df_split <- train_test_split(df)
+```
+
+```{r}
+train <- df_split$train
+test <- df_split$test
+```
+
+```{r}
+numerical_vars <- names(train)[1:6]
+```
+
+
+## Categorical data 
+We start by checking the frequency of Characteristics across our Pokemon population in the training sample:
+```{r}
+train %>%  
+  select(-numerical_vars, -Legendary, -gen_1, -gen_2, -gen_3, -gen_4, -gen_5, -gen_6) %>%  
+  summarise(across(everything(), sum, na.rm = TRUE)) %>%  
+  pivot_longer(cols = everything(), names_to = "Feature", values_to = "Total_Sum") %>%  
+  mutate(Percentage = (Total_Sum / sum(Total_Sum)) * 100) %>%  
+  select(Feature, Percentage) %>%  
+  kable(col.names = c("Feature", "Occurrence (%)"), format = "html") %>%  
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),  
+                full_width = FALSE, position = "center") %>%  
+  column_spec(1, color = "black", background = "white") %>%  
+  column_spec(2, color = "black", background = "white") %>%  
+  row_spec(0, bold = TRUE, color = "black", background = "darkgray") %>%  
+  footnote(general = "Calculated percentage based on total sum of occurrences for each feature.")
+```
+
+Check if the probability of having a Legendary is equal accross generation to decide whether to keep the variable.
+```{r}
+train %>%
+  select(gen_1, gen_2, gen_3, gen_4, gen_5, gen_6) %>%  
+  summarise(across(everything(), sum, na.rm = TRUE)) %>%  
+  pivot_longer(cols = everything(), names_to = "Feature", values_to = "Total_Sum") %>%  
+  mutate(Percentage = (Total_Sum / sum(Total_Sum)) * 100) %>%  
+  select(Feature, Percentage) %>%  # 
+  kable(col.names = c("Generation", "Occurrence (%)"), format = "html") %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = FALSE, position = "center") %>%
+  column_spec(1, color = "black", background = "white") %>%  
+  column_spec(2, color = "black", background = "white") %>%  
+  row_spec(0, bold = TRUE, color = "black", background = "darkgray") %>%  
+  footnote(general = "Calculated percentage based on total sum of occurrences for each generation.")
+```
+Now we can drop Generation 1, so that it is the baseline:
+```{r}
+train <- train %>% 
+  select(-gen_1)
+```
+
+
+Since it's not equally likely to find a legendary Pokemon in each generation, with odd generations presenting more datapoints, it is important to keep it.
+
+## Numerical data 
+
+```{r}
+# Numerical Variables
+train %>%
+    select(numerical_vars) %>%
+    summary()
+```
+
+```{r}
+par(mfrow = c(2, 4), mar = c(3, 3, 3, 3))
+lapply(numerical_vars, function(col_name) {
+    hist(train[[col_name]], main = paste("Histogram of", col_name), xlab = "variable")
+})
+par(mfrow = c(1, 1))
+```
+
+```{r}
+cor_mat <- cor(train[numerical_vars])
+print(cor_mat)
+corrplot(cor_mat, method = "square", type = "upper", tl.col = "black", tl.srt = 45)
+```
+
+
+```{r}
+scaling_params <- sapply(train[numerical_vars], mean)
+scaling_params_sd <- sapply(train[numerical_vars], sd)
+
+train_std <- train
+train_std[numerical_vars] <- sweep(train_std[numerical_vars], 2, scaling_params, "-")
+train_std[numerical_vars] <- sweep(train_std[numerical_vars], 2, scaling_params_sd, "/")
+
+# Apply the same scaling to test data
+test_std <- test
+test_std[numerical_vars] <- sweep(test_std[numerical_vars], 2, scaling_params, "-")
+test_std[numerical_vars] <- sweep(test_std[numerical_vars], 2, scaling_params_sd, "/")
+```
+
+Checks
+```{r}
+sapply(list(mean = mean, sd = sd), mapply, train_std |> select(numerical_vars))
+sapply(list(mean = mean, sd = sd), mapply, test_std |> select(numerical_vars))
+```
+
+```{r}
+cv_seed <- list(
+    c(7, 18, 21, 34, 50, 67, 71, 85, 90, 44, 62, 37, 12, 55, 28, 99, 46, 19, 38, 68, 23),
+    c(9, 16, 11, 40, 51, 53, 45, 64, 39, 57, 69, 27, 72, 61, 36, 56, 75, 80, 66, 26, 32),
+    c(18, 25, 48, 31, 42, 35, 63, 22, 20, 77, 24, 74, 49, 10, 16, 82, 33, 13, 14, 58, 60),
+    c(39, 41, 17, 55, 59, 26, 65, 30, 79, 19, 73, 12, 27, 70, 50, 84, 76, 28, 20, 35, 37),
+    c(61, 43, 33, 44, 52, 72, 31, 78, 57, 49, 22, 76, 56, 47, 35, 69, 66, 21, 62, 9, 36),
+    c(24, 83, 75, 59, 32, 64, 60, 52, 25, 58, 48, 71, 40, 50, 54, 39, 53, 23, 15, 12, 20),
+    c(45, 14, 37, 19, 80, 53, 28, 55, 41, 23, 51, 29, 64, 47, 67, 60, 22, 32, 49, 66, 68),
+    c(63, 15, 48, 40, 26, 34, 77, 39, 61, 29, 52, 46, 69, 73, 16, 59, 79, 41, 17, 10, 54),
+    c(62, 55, 77, 56, 24, 38, 81, 22, 18, 71, 48, 63, 60, 35, 45, 73, 49, 68, 32, 50, 28),
+    c(84, 36, 29, 68, 16, 59, 14, 79, 25, 57, 71, 34, 53, 67, 40, 51, 15, 46, 69, 76, 33),
+    99 # Last element with a single integer
+)
+```
+```{r}
+extract_best_f <- function(fit) fit$results[which.max(fit$results$F), ]
+```
+```{r}
+grid_search_threshold <- function(fit) {
+    best_given_threshold <- data.frame(matrix(ncol = 4, nrow = 0))
+    colnames(best_given_threshold) <- c("alpha", "lambda", "prob_threshold", "F1")
+    all_threhsolds <- seq(0.3, 0.8, 0.1)
+    for (tr in all_threhsolds) {
+        res <- thresholder(logistic_elnet_1, tr, F, "F1")
+        best <- res[which.max(res$F1), ]
+        best_given_threshold <- rbind(best_given_threshold, best)
+    }
+    return(best_given_threshold)
+}
+extract_best_threshold_f <- function(grid_df) {
+    grid_df[which.max(grid_df$F1), ]
+}
+```
+Fitting a logistic elastic net. Grid search of optimal alpha and lambda. CV. Maximize F.
+```{r}
+grid_ <- expand.grid(
+    .alpha = seq(0, 1, by = 0.1),
+    .lambda = 10^(-c(0, 1, 10, 100, 1000))
+)
+
+train_control_1 <- trainControl(
+    method = "cv",
+    number = 10,
+    classProbs = TRUE,
+    summaryFunction = prSummary,
+    savePredictions = "all",
+    seeds = cv_seed
+)
+
+logistic_elnet_1 <- train(
+    Legendary ~ .,
+    data = train_std,
+    method = "glmnet",
+    family = "binomial",
+    metric = "F",
+    tuneGrid = grid_,
+    trControl = train_control_1
+)
+
+print(logistic_elnet_1$bestTune)
+print(extract_best_f(logistic_elnet_1))
+best_f_1 <- grid_search_threshold(logistic_elnet_1)
+print(best_f_1)
+print(extract_best_threshold_f(best_f_1))
+plot(logistic_elnet_1)
+```
+
+Fitting a logistic elastic net. Grid search of optimal alpha and lambda. SMOTE CV. Maximize F.
+```{r}
+train_control_2 <- trainControl(
+    method = "cv",
+    number = 10,
+    sampling = "smote",
+    classProbs = TRUE,
+    summaryFunction = prSummary,
+    savePredictions = "all",
+    seed = cv_seed
+)
+
+logistic_elnet_2 <- train(
+    Legendary ~ .,
+    data = train_std,
+    method = "glmnet",
+    family = "binomial",
+    metric = "F",
+    tuneGrid = grid_,
+    trControl = train_control_2
+)
+print(logistic_elnet_2$bestTune)
+print(extract_best_f(logistic_elnet_2))
+best_f_2 <- grid_search_threshold(logistic_elnet_2)
+print(best_f_2)
+print(extract_best_threshold_f(best_f_2))
+plot(logistic_elnet_2)
+```
+
+Fitting a logistic elastic net. Grid search of optimal alpha and lambda. Upsampling CV. Maximize F.
+
+```{r}
+train_control_3 <- trainControl(
+    method = "cv",
+    number = 10,
+    sampling = "up",
+    classProbs = TRUE,
+    summaryFunction = prSummary,
+    savePredictions = "all",
+    seed = cv_seed
+)
+
+logistic_elnet_3 <- train(
+    Legendary ~ .,
+    data = train_std,
+    method = "glmnet",
+    family = "binomial",
+    metric = "F",
+    tuneGrid = grid_,
+    trControl = train_control_3
+)
+print(logistic_elnet_3$bestTune)
+print(extract_best_f(logistic_elnet_3))
+best_f_3 <- grid_search_threshold(logistic_elnet_3)
+print(best_f_3)
+print(extract_best_threshold_f(best_f_3))
+plot(logistic_elnet_3)
+```
+
+Fitting a logistic elastic net. Grid search of optimal alpha and lambda. Downsampling CV. Maximize F.
+
+```{r}
+train_control_4 <- trainControl(
+    method = "cv",
+    number = 10,
+    sampling = "down",
+    classProbs = TRUE,
+    summaryFunction = prSummary,
+    savePredictions = "all",
+    seed = cv_seed
+)
+
+logistic_elnet_4 <- train(
+    Legendary ~ .,
+    data = train_std,
+    method = "glmnet",
+    family = "binomial",
+    metric = "F",
+    tuneGrid = grid_,
+    trControl = train_control_3
+)
+print(logistic_elnet_4$bestTune)
+print(extract_best_f(logistic_elnet_4))
+best_f_4 <- grid_search_threshold(logistic_elnet_4)
+print(best_f_4)
+print(extract_best_threshold_f(best_f_4))
+plot(logistic_elnet_4)
+```
+
+### Prediction
+```{r}
+get_prediction <- function(fit, type = "raw") {
+    predict(fit, type = type, newdata = test_std |> select(-Legendary))
+}
+
+get_accuracy <- function(fit) {
+    y <- test_std$Legendary
+    y_hat <- predict(fit, type = "raw", newdata = test_std |>
+        select(-Legendary))
+    return(mean(y == y_hat))
+}
+```
+```{r}
+list_el_net <- list(logistic_elnet_1, logistic_elnet_2, logistic_elnet_3, logistic_elnet_4)
+lapply(list_el_net, get_accuracy)
+```
+```{r}
+lapply(list_el_net, confusionMatrix)
+```
+
+```{r}
+get_prediction_thresh <- function(best_f, trainControl) {
+    best <- extract_best_threshold_f(best_f)
+    alpha <- best$alpha
+    lambda <- best$lambda
+    tr <- best$prob_threshold
+    grid_ <- data.frame(.alpha = alpha, .lambda = lambda)
+    fit <- train(
+        Legendary ~ .,
+        data = train_std,
+        method = "glmnet",
+        family = "binomial",
+        metric = "F",
+        tuneGrid = grid_,
+        trControl = trainControl
+    )
+    probs <- get_prediction(fit, "prob")[, 2]
+    y_hat <- as.factor(ifelse(probs > tr, "Yes", "No"))
+    attr(y_hat, "threshold") <- tr
+    attr(y_hat, "alpha") <- alpha
+    attr(y_hat, "lambda") <- lambda
+    return(y_hat)
+}
+get_accuracy_thresh <- function(y_hat) {
+    return(mean(test_std$Legendary == y_hat))
+}
+```
+```{r}
+get_prediction_thresh(best_f_1, train_control_1) |> get_accuracy_thresh()
+get_prediction_thresh(best_f_2, train_control_2) |> get_accuracy_thresh()
+get_prediction_thresh(best_f_3, train_control_3) |> get_accuracy_thresh()
+get_prediction_thresh(best_f_4, train_control_4) |> get_accuracy_thresh()
+```
+```{r}
+get_confusion_matrix <- function(y_hat) {
+    confusionMatrix(y_hat, as.factor(test_std$Legendary))
+}
+get_prediction_thresh(best_f_1, train_control_1) |> get_confusion_matrix()
+get_prediction_thresh(best_f_2, train_control_2) |> get_confusion_matrix()
+get_prediction_thresh(best_f_3, train_control_3) |> get_confusion_matrix()
+get_prediction_thresh(best_f_4, train_control_4) |> get_confusion_matrix()
+```
+
+
+
+
+
+

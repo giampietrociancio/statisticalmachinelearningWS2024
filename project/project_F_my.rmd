@@ -1,0 +1,941 @@
+---
+title: "Pokemon Project"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(dplyr)
+library(MLmetrics)
+library(ggplot2)
+library(caret)
+library(knitr)
+library(kableExtra)
+library(corrplot)
+```
+
+## Data
+--- add description here
+
+## Feature extraction
+Import the df and visualize the columns' name.
+```{r}
+df <- read.csv("data.csv")
+names(df)
+```
+Drop useless columns X., Name.
+
+```{r}
+df <- df |>
+    mutate(Legendary = as.integer(as.logical(Legendary))) |>
+    select(-X., -Name)
+```
+Check that Tot is just a linear combination of other columns. If yes, drop it.
+```{r}
+if (all((df$HP + df$Attack + df$Defense + df$SP..Attack + df$SP..Defense + df$Speed) == df$Total)) {
+    df <- df |> select(-Total)
+}
+```
+
+One-hot encoding from Type.1 and Type.2.
+
+```{r}
+unique_types <- c(df$Type.1, df$Type.2) |> unique()
+
+for (typ in unique_types[-1]) {
+    if (typ == "") next
+    df[typ] <- 0
+    for (row in 1:nrow(df)) {
+        has_type <- typ %in% df[row, c("Type.1", "Type.2")]
+        if (has_type) {
+            df[row, typ] <- 1
+        }
+    }
+}
+```
+Encode Generation.
+```{r}
+for (i in unique(df$Generation)) {
+    if (i == 1) next
+    col_name <- paste0("gen_", i)
+    df[col_name] <- 0
+}
+
+for (row in 1:nrow(df)) {
+    gen <- df[row, "Generation"]
+    if (gen == 1) next
+    col_name <- paste0("gen_", gen)
+    df[row, col_name] <- 1
+}
+```
+Drop the categorical columns that we don't need anymore and set Legendary to factor.
+```{r}
+df <- df |>
+    select(-Type.1, -Type.2, -Generation) |>
+    mutate(Legendary = as.factor(ifelse(Legendary == 0, "No", "Yes")))
+```
+
+```{r}
+colnames(df)[c(1, 4, 5)] <- c("Hit_Point", "Special_Attack", "Special_Defense")
+```
+
+```{r}
+set.seed(123)
+train_test_split <- function(df, perc_train = 0.7) {
+    i_train <- sample(1:nrow(df), floor(0.7 * nrow(df)), F)
+    list_out <- list(train = df[i_train, ], test = df[-i_train, ])
+    return(list_out)
+}
+df_split <- train_test_split(df)
+```
+
+```{r}
+train <- df_split$train
+test <- df_split$test
+```
+
+```{r}
+numerical_vars <- names(train)[1:6]
+```
+Verify whether the prob of having Legendary is equal accross Generation to decide whether to keep the variable
+
+```{r}
+# train %>%
+#    group_by(Generation) %>%
+#    summarise(mean(Legendary))
+```
+
+
+Categorical data
+```{r}
+train %>%
+    select(-numerical_vars, -Legendary) %>%
+    colMeans() * 100 # Percentage values
+```
+
+```{r}
+# Numerical Variables
+train %>%
+    select(numerical_vars) %>%
+    summary()
+```
+
+```{r}
+par(mfrow = c(2, 4), mar = c(3, 3, 3, 3))
+lapply(numerical_vars, function(col_name) {
+    hist(train[[col_name]], main = paste("Histogram of", col_name), xlab = "variable")
+})
+par(mfrow = c(1, 1))
+```
+
+```{r}
+library(corrplot)
+cor_mat <- cor(train[numerical_vars])
+print(cor_mat)
+corrplot(cor_mat, method = "square", type = "upper", tl.col = "black", tl.srt = 45)
+```
+
+
+```{r}
+scaling_params <- sapply(train[numerical_vars], mean)
+scaling_params_sd <- sapply(train[numerical_vars], sd)
+
+train_std <- train
+train_std[numerical_vars] <- sweep(train_std[numerical_vars], 2, scaling_params, "-")
+train_std[numerical_vars] <- sweep(train_std[numerical_vars], 2, scaling_params_sd, "/")
+
+# Apply the same scaling to test data
+test_std <- test
+test_std[numerical_vars] <- sweep(test_std[numerical_vars], 2, scaling_params, "-")
+test_std[numerical_vars] <- sweep(test_std[numerical_vars], 2, scaling_params_sd, "/")
+```
+Checks
+```{r}
+sapply(list(mean = mean, sd = sd), mapply, train_std |> select(numerical_vars))
+sapply(list(mean = mean, sd = sd), mapply, test_std |> select(numerical_vars))
+```
+```{r}
+cv_seed <- list(
+    c(7, 18, 21, 34, 50, 67, 71, 85, 90, 44, 62, 37, 12, 55, 28, 99, 46, 19, 38, 68, 23),
+    c(9, 16, 11, 40, 51, 53, 45, 64, 39, 57, 69, 27, 72, 61, 36, 56, 75, 80, 66, 26, 32),
+    c(18, 25, 48, 31, 42, 35, 63, 22, 20, 77, 24, 74, 49, 10, 16, 82, 33, 13, 14, 58, 60),
+    c(39, 41, 17, 55, 59, 26, 65, 30, 79, 19, 73, 12, 27, 70, 50, 84, 76, 28, 20, 35, 37),
+    c(61, 43, 33, 44, 52, 72, 31, 78, 57, 49, 22, 76, 56, 47, 35, 69, 66, 21, 62, 9, 36),
+    c(24, 83, 75, 59, 32, 64, 60, 52, 25, 58, 48, 71, 40, 50, 54, 39, 53, 23, 15, 12, 20),
+    c(45, 14, 37, 19, 80, 53, 28, 55, 41, 23, 51, 29, 64, 47, 67, 60, 22, 32, 49, 66, 68),
+    c(63, 15, 48, 40, 26, 34, 77, 39, 61, 29, 52, 46, 69, 73, 16, 59, 79, 41, 17, 10, 54),
+    c(62, 55, 77, 56, 24, 38, 81, 22, 18, 71, 48, 63, 60, 35, 45, 73, 49, 68, 32, 50, 28),
+    c(84, 36, 29, 68, 16, 59, 14, 79, 25, 57, 71, 34, 53, 67, 40, 51, 15, 46, 69, 76, 33),
+    99 # Last element with a single integer
+)
+```
+```{r}
+extract_best_f <- function(fit) fit$results[which.max(fit$results$F), ]
+```
+```{r}
+grid_search_threshold <- function(fit) {
+    best_given_threshold <- data.frame(matrix(ncol = 4, nrow = 0))
+    colnames(best_given_threshold) <- c("alpha", "lambda", "prob_threshold", "F1")
+    all_threhsolds <- seq(0.3, 0.8, 0.1)
+    for (tr in all_threhsolds) {
+        res <- thresholder(fit, tr, F, "F1")
+        best <- res[which.max(res$F1), ]
+        best_given_threshold <- rbind(best_given_threshold, best)
+    }
+    return(best_given_threshold)
+}
+extract_best_threshold_f <- function(grid_df) {
+    grid_df[which.max(grid_df$F1), ]
+}
+```
+Fitting a logistic elastic net. Grid search of optimal alpha and lambda. CV. Maximize F.
+```{r}
+grid_ <- expand.grid(
+    .alpha = seq(0, 1, by = 0.1),
+    .lambda = 10^(-c(0, 1, 10, 100, 1000))
+)
+
+train_control_1 <- trainControl(
+    method = "cv",
+    number = 10,
+    classProbs = TRUE,
+    summaryFunction = prSummary,
+    savePredictions = "all",
+    seeds = cv_seed
+)
+
+logistic_elnet_1 <- train(
+    Legendary ~ .,
+    data = train_std,
+    method = "glmnet",
+    family = "binomial",
+    metric = "F",
+    tuneGrid = grid_,
+    trControl = train_control_1
+)
+
+print(logistic_elnet_1$bestTune)
+print(extract_best_f(logistic_elnet_1))
+best_f_1 <- grid_search_threshold(logistic_elnet_1)
+print(best_f_1)
+print(extract_best_threshold_f(best_f_1))
+plot(logistic_elnet_1)
+```
+
+Fitting a logistic elastic net. Grid search of optimal alpha and lambda. SMOTE CV. Maximize F.
+```{r}
+train_control_2 <- trainControl(
+    method = "cv",
+    number = 10,
+    sampling = "smote",
+    classProbs = TRUE,
+    summaryFunction = prSummary,
+    savePredictions = "all",
+    seed = cv_seed
+)
+
+logistic_elnet_2 <- train(
+    Legendary ~ .,
+    data = train_std,
+    method = "glmnet",
+    family = "binomial",
+    metric = "F",
+    tuneGrid = grid_,
+    trControl = train_control_2
+)
+print(logistic_elnet_2$bestTune)
+print(extract_best_f(logistic_elnet_2))
+best_f_2 <- grid_search_threshold(logistic_elnet_2)
+print(best_f_2)
+print(extract_best_threshold_f(best_f_2))
+plot(logistic_elnet_2)
+```
+
+Fitting a logistic elastic net. Grid search of optimal alpha and lambda. Upsampling CV. Maximize F.
+
+```{r}
+train_control_3 <- trainControl(
+    method = "cv",
+    number = 10,
+    sampling = "up",
+    classProbs = TRUE,
+    summaryFunction = prSummary,
+    savePredictions = "all",
+    seed = cv_seed
+)
+
+logistic_elnet_3 <- train(
+    Legendary ~ .,
+    data = train_std,
+    method = "glmnet",
+    family = "binomial",
+    metric = "F",
+    tuneGrid = grid_,
+    trControl = train_control_3
+)
+print(logistic_elnet_3$bestTune)
+print(extract_best_f(logistic_elnet_3))
+best_f_3 <- grid_search_threshold(logistic_elnet_3)
+print(best_f_3)
+print(extract_best_threshold_f(best_f_3))
+plot(logistic_elnet_3)
+```
+
+Fitting a logistic elastic net. Grid search of optimal alpha and lambda. Downsampling CV. Maximize F.
+
+```{r}
+train_control_4 <- trainControl(
+    method = "cv",
+    number = 10,
+    sampling = "down",
+    classProbs = TRUE,
+    summaryFunction = prSummary,
+    savePredictions = "all",
+    seed = cv_seed
+)
+
+logistic_elnet_4 <- train(
+    Legendary ~ .,
+    data = train_std,
+    method = "glmnet",
+    family = "binomial",
+    metric = "F",
+    tuneGrid = grid_,
+    trControl = train_control_4
+)
+print(logistic_elnet_4$bestTune)
+print(extract_best_f(logistic_elnet_4))
+best_f_4 <- grid_search_threshold(logistic_elnet_4)
+print(best_f_4)
+print(extract_best_threshold_f(best_f_4))
+plot(logistic_elnet_4)
+```
+
+### Prediction
+```{r}
+get_prediction <- function(fit, type = "raw") {
+    predict(fit, type = type, newdata = test_std |> select(-Legendary))
+}
+
+get_accuracy <- function(fit) {
+    y <- test_std$Legendary
+    y_hat <- predict(fit, type = "raw", newdata = test_std |>
+        select(-Legendary))
+    return(mean(y == y_hat))
+}
+```
+```{r}
+lapply(list(logistic_elnet_1, logistic_elnet_2, logistic_elnet_3, logistic_elnet_4), get_accuracy)
+```
+```{r}
+get_prediction_thresh <- function(best_f, trainControl) {
+    best <- extract_best_threshold_f(best_f)
+    alpha <- best$alpha
+    lambda <- best$lambda
+    tr <- best$prob_threshold
+    grid_ <- data.frame(.alpha = alpha, .lambda = lambda)
+    fit <- train(
+        Legendary ~ .,
+        data = train_std,
+        method = "glmnet",
+        family = "binomial",
+        metric = "F",
+        tuneGrid = grid_,
+        trControl = trainControl
+    )
+    probs <- get_prediction(fit, "prob")[, 2]
+    y_hat <- as.factor(ifelse(probs > tr, "Yes", "No"))
+    attr(y_hat, "threshold") <- tr
+    attr(y_hat, "alpha") <- alpha
+    attr(y_hat, "lambda") <- lambda
+    return(y_hat)
+}
+get_accuracy_thresh <- function(y_hat) {
+    return(mean(test_std$Legendary == y_hat))
+}
+```
+```{r}
+get_prediction_thresh(best_f_1, train_control_1) |> get_accuracy_thresh()
+get_prediction_thresh(best_f_2, train_control_2) |> get_accuracy_thresh()
+get_prediction_thresh(best_f_3, train_control_3) |> get_accuracy_thresh()
+get_prediction_thresh(best_f_4, train_control_4) |> get_accuracy_thresh()
+```
+
+```{r}
+get_confusion_matrix <- function(y_hat) {
+    confusionMatrix(y_hat, as.factor(test_std$Legendary))
+}
+get_prediction_thresh(best_f_1, train_control_1) |> get_confusion_matrix()
+get_prediction_thresh(best_f_2, train_control_2) |> get_confusion_matrix()
+get_prediction_thresh(best_f_3, train_control_3) |> get_confusion_matrix()
+get_prediction_thresh(best_f_4, train_control_4) |> get_confusion_matrix()
+```
+
+
+
+# Extreme Gradient Boosting 
+
+## Fitting models
+
+```{r message=FALSE, warning=FALSE}
+library(xgboost)
+
+grid_xgb <- expand.grid(
+    nrounds = c(50, 100, 150), # Number of boosting rounds
+    eta = c(0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5), # Learning rate
+    max_depth = c(3, 6), # Maximum tree depth
+    gamma = 0, # Minimum loss reduction; set to default
+    colsample_bytree = 1, # Subsample ratio of columns; set to default
+    min_child_weight = 1, # Minimum sum of instance weight; set to default
+    subsample = 1 # set to default
+)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+Sys.setenv(DMLC_LOG_FATAL = 1)
+
+xgb_model1 <- train(
+    Legendary ~ .,
+    data = train_std,
+    method = "xgbTree",
+    metric = "F",
+    tuneGrid = grid_xgb,
+    trControl = train_control_1,
+    verbose = FALSE
+)
+
+extract_best_f(xgb_model1)
+plot(xgb_model1)
+```
+
+
+### SMOTE
+
+```{r message=FALSE, warning=FALSE}
+Sys.setenv(DMLC_LOG_FATAL = 1)
+xgb_model2 <- train(
+    Legendary ~ .,
+    data = train_std,
+    method = "xgbTree",
+    metric = "F",
+    tuneGrid = grid_xgb,
+    trControl = train_control_2,
+    verbose = FALSE
+)
+
+extract_best_f(xgb_model2)
+plot(xgb_model2)
+```
+
+
+### Upsampling
+
+```{r message=FALSE, warning=FALSE}
+Sys.setenv(DMLC_LOG_FATAL = 1)
+xgb_model3 <- train(
+    Legendary ~ .,
+    data = train_std,
+    method = "xgbTree",
+    metric = "F",
+    tuneGrid = grid_xgb,
+    trControl = train_control_3,
+    verbose = FALSE
+)
+
+extract_best_f(xgb_model3)
+plot(xgb_model3)
+```
+
+### Downsampling
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+Sys.setenv(DMLC_LOG_FATAL = 1)
+xgb_model4 <- train(
+    Legendary ~ .,
+    data = train_std,
+    method = "xgbTree",
+    metric = "F",
+    tuneGrid = grid_xgb,
+    trControl = train_control_4,
+    verbose = FALSE
+)
+
+extract_best_f(xgb_model4)
+plot(xgb_model4)
+```
+
+## Comparison of F1 Score
+
+```{r message=FALSE, warning=FALSE}
+evaluation_xgb <- as.data.frame(rbind(
+    extract_best_f(xgb_model1),
+    extract_best_f(xgb_model2),
+    extract_best_f(xgb_model3),
+    extract_best_f(xgb_model4)
+))
+
+evaluation_xgb <- evaluation_xgb |>
+    select(
+        -gamma, -colsample_bytree, -min_child_weight, -subsample,
+        -AUCSD, -PrecisionSD, -RecallSD, -FSD
+    )
+rownames(evaluation_xgb) <- c("Default-Case", "SMOTE", "Up-sampling", "Down-Sampling")
+kable(evaluation_xgb)
+```
+
+- Using SMOTE as sampling method generates the highest F1
+
+- Up-sampling performs similarly to the default case with a good balance of precision and recall, and a strong AUC. It shows that duplicating the minority class can yield comparable performance to the default configuration. The F1 score is slightly worse than for SMOTE
+
+- Down-sampling achieves high precision but at the cost of recall. It gives the lowest F1.
+
+
+```{r message=FALSE, warning=FALSE}
+# Using different probability thresholds
+grid_search_threshold_xgb <- function(fit, thresholds = seq(0.3, 0.8, by = 0.1)) {
+    best_given_threshold <- data.frame(matrix(ncol = 9, nrow = 0))
+
+    for (tr in thresholds) {
+        # Use the thresholder function to evaluate F1 scores at different thresholds
+        res <- thresholder(fit, threshold = tr, final = FALSE, statistics = "F1")
+        best <- res[which.max(res$F1), ]
+        best_given_threshold <- rbind(best_given_threshold, best)
+    }
+    best_given_threshold <- best_given_threshold |>
+        select(-gamma, -colsample_bytree, -min_child_weight, -subsample)
+
+    return(best_given_threshold)
+}
+
+xgb_best_f_1 <- grid_search_threshold_xgb(xgb_model1)
+xgb_best_f_2 <- grid_search_threshold_xgb(xgb_model2)
+xgb_best_f_3 <- grid_search_threshold_xgb(xgb_model3)
+xgb_best_f_4 <- grid_search_threshold_xgb(xgb_model4)
+
+evaluation_xgb <- as.data.frame(rbind(
+    extract_best_threshold_f(xgb_best_f_1),
+    extract_best_threshold_f(xgb_best_f_2),
+    extract_best_threshold_f(xgb_best_f_3),
+    extract_best_threshold_f(xgb_best_f_4)
+))
+rownames(evaluation_xgb) <- c("Default-Case", "SMOTE", "Up-sampling", "Down-Sampling")
+kable(evaluation_xgb)
+```
+
+
+- The model performs well without special sampling. The F1 score is high, indicating a good balance between precision and recall.
+
+- Using SMOTE improves the F1 score. This suggests that balancing the classes helps the model better detect rare classes i.e. the sampling method works well when the dataset is imbalanced.
+
+- Up-sampling also performs well but slightly worse than SMOTE. It indicates that repeating the minority class data helps the model.
+
+- Down-sampling yields the lowest F1 score, implying that reducing the number of majority class samples to balance the dataset may lead to some loss of information and a less effective model.
+
+## Prediction
+
+```{r}
+xgb_models <- list(xgb_model1, xgb_model2, xgb_model3, xgb_model4)
+accuracy_xgb <- do.call(rbind, lapply(xgb_models, get_accuracy))
+rownames(accuracy_xgb) <- c("Default-Case", "SMOTE", "Up-sampling", "Down-Sampling")
+colnames(accuracy_xgb) <- "Accuracy"
+kable(accuracy_xgb)
+```
+
+- The model without any special sampling technique  achieved the highest accuracy.
+- Up-sampling gives the second highest accuracy. It seems like duplicating the minority class (Legendary="yes") helped improved model performance slightly over SMOTE.
+- The model using down-sampling gives the lowest accuracy - reducing the size of the majority class (Legendary="No") might have caused a loss in important information.
+
+
+
+### Testing different prob. thresholds
+
+```{r}
+get_prediction_thresh_xgb <- function(best_f, trainControl) {
+    # extract the best threshold from the results and the parameters
+    best <- extract_best_threshold_f(best_f)
+    eta <- best$eta
+    max_depth <- best$max_depth
+    nrounds <- best$nrounds
+    tr <- best$prob_threshold
+
+    # define the tuning grid
+    grid_xgb <- expand.grid(
+        nrounds = nrounds,
+        eta = eta,
+        max_depth = max_depth,
+        gamma = 0, # Default value
+        colsample_bytree = 1, # Default value
+        min_child_weight = 1, # Default value
+        subsample = 1 # Default value
+    )
+
+    # train the model
+    fit_xgb <- train(
+        Legendary ~ .,
+        data = train_std,
+        method = "xgbTree",
+        metric = "F",
+        tuneGrid = grid_xgb,
+        trControl = trainControl,
+        verbose = FALSE
+    )
+
+    # get the predicted probabilities
+    probs <- predict(fit_xgb, newdata = test_std, type = "prob")[, 2]
+
+    # apply the threshold
+    y_hat <- as.factor(ifelse(probs > tr, "Yes", "No"))
+
+    # set levels of y_hat to match test_std$Legendary
+    y_hat <- factor(y_hat, levels = levels(test_std$Legendary))
+
+    # store as attributes of y_hat
+    attr(y_hat, "threshold") <- tr
+    attr(y_hat, "eta") <- eta
+    attr(y_hat, "max_depth") <- max_depth
+    attr(y_hat, "nrounds") <- nrounds
+
+    return(y_hat)
+}
+
+acc_1 <- get_prediction_thresh_xgb(xgb_best_f_1, train_control_1) |> get_accuracy_thresh()
+acc_2 <- get_prediction_thresh_xgb(xgb_best_f_2, train_control_2) |> get_accuracy_thresh()
+acc_3 <- get_prediction_thresh_xgb(xgb_best_f_3, train_control_3) |> get_accuracy_thresh()
+acc_4 <- get_prediction_thresh_xgb(xgb_best_f_4, train_control_4) |> get_accuracy_thresh()
+
+accuracy_xgb <- rbind(acc_1, acc_2, acc_3, acc_4)
+rownames(accuracy_xgb) <- c("Default-Case", "SMOTE", "Up-sampling", "Down-Sampling")
+colnames(accuracy_xgb) <- "Accuracy"
+kable(accuracy_xgb)
+```
+The significant drop in accuracy for the model using down-sampling is caused by the lower threshold used to maximize the F1-score. The lower threshold leads to all predictions being equal to "Yes" (=minority class) i.e. the lower applies threshold leads to an increasing bias toward prediciting "Yes".
+
+
+
+```{r}
+y_hat_xgb_4 <- get_prediction_thresh_xgb(xgb_best_f_4, train_control_4)
+confusionMatrix(y_hat_xgb_4, test_std$Legendary)
+```
+# Random Forest 
+
+```{r}
+library(randomForest)
+## parallelize the computational process
+library(doParallel)
+cl <- makePSOCKcluster(5)
+registerDoParallel(cl)
+```
+
+
+
+## Fitting a random forest. Grid search of optimal mtry. CV. Maximize F. ###################################
+```{r}
+grid_rf <- expand.grid(.mtry = 1:28) # mtry -- number of variables randomly sampled as candidates at each split
+rf_model1 <- train(Legendary ~ .,
+    data = train_std,
+    method = "rf",
+    metric = "F",
+    tuneGrid = grid_rf,
+    trcontrol = train_control_1,
+    verbose = FALSE,
+    proximity = FALSE,
+    importance = TRUE
+)
+# summary of the model
+print(rf_model1)
+plot(rf_model1, main = "\n # Variable selection: Random Forest")
+```
+
+```{r}
+# feature importance
+ggplot(varImp(rf_model1), aes(
+    x = reorder(feature, Importance),
+    y = Importance
+)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    theme_classic() +
+    labs(
+        x     = "Feature",
+        y     = "Importance",
+        title = "Feature Importance: Random Forest (cv)"
+    )
+```
+
+```{r}
+## manually find the best ntree parameter
+tunegrid1 <- expand.grid(.mtry = 26)
+modellist1 <- list()
+
+# train with different ntree parameters
+for (ntree in c(500, 1500, 2500, 5000)) {
+    fit <- train(Legendary ~ .,
+        data = train_std,
+        method = "rf",
+        metric = "F",
+        tuneGrid = tunegrid1,
+        trControl = train_control_1,
+        ntree = ntree
+    )
+    key <- toString(ntree)
+    modellist1[[key]] <- fit
+}
+
+# Compare results
+results1 <- resamples(modellist1)
+summary(results1)
+dotplot(results1) # highest Precision-Recall score when ntrees=2500, mtry=26
+```
+
+
+## Fitting a random forest. Grid search of optimal mtry. SMOTE CV. Maximize F. ##################################
+
+```{r}
+rf_model2 <- train(Legendary ~ .,
+    data = train_std,
+    method = "rf",
+    metric = "F",
+    tuneGrid = grid_rf,
+    trcontrol = train_control_2,
+    verbose = FALSE,
+    proximity = FALSE,
+    importance = TRUE
+)
+# summary of the model
+print(rf_model2)
+plot(rf_model2, main = "\n # Variable selection: Random Forest")
+```
+
+
+```{r}
+# feature importance
+ggplot(varImp(rf_model2), aes(
+    x = reorder(feature, Importance),
+    y = Importance
+)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    theme_classic() +
+    labs(
+        x     = "Feature",
+        y     = "Importance",
+        title = "Feature Importance: Random Forest (SMOTE cv)"
+    )
+## manually find the best ntree parameter
+tunegrid2 <- expand.grid(.mtry = 8)
+modellist2 <- list()
+
+# train with different ntree parameters
+for (ntree in c(500, 1500, 2500, 5000)) {
+    fit <- train(Legendary ~ .,
+        data = train_std,
+        method = "rf",
+        metric = "F",
+        tuneGrid = tunegrid2,
+        trControl = train_control_2,
+        ntree = ntree
+    )
+    key <- toString(ntree)
+    modellist2[[key]] <- fit
+}
+
+# Compare results
+results2 <- resamples(modellist2)
+summary(results2)
+dotplot(results2) # highest Precision-Recall score when ntree=500, mtry=8
+```
+
+
+## Fitting a random forest. Grid search of optimal mtry. Upsampling CV. Maximize F. ################################
+
+```{r}
+rf_model3 <- train(Legendary ~ .,
+    data = train_std,
+    method = "rf",
+    metric = "F",
+    tuneGrid = grid_rf,
+    trcontrol = train_control_3,
+    verbose = FALSE,
+    proximity = FALSE,
+    importance = TRUE
+)
+# summary of the model
+print(rf_model3)
+plot(rf_model3, main = "\n # Variable selection: Random Forest")
+```
+
+```{r}
+# feature importance
+ggplot(varImp(rf_model3), aes(
+    x = reorder(feature, Importance),
+    y = Importance
+)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    theme_classic() +
+    labs(
+        x     = "Feature",
+        y     = "Importance",
+        title = "Feature Importance: Random Forest (Upsampling cv)"
+    )
+## manually find the best ntree parameter
+tunegrid3 <- expand.grid(.mtry = 25)
+modellist3 <- list()
+
+# train with different ntree parameters
+for (ntree in c(500, 1500, 2500, 5000)) {
+    fit <- train(Legendary ~ .,
+        data = train_std,
+        method = "rf",
+        metric = "F",
+        tuneGrid = tunegrid3,
+        trControl = train_control_3,
+        ntree = ntree
+    )
+    key <- toString(ntree)
+    modellist3[[key]] <- fit
+}
+
+# Compare results
+results3 <- resamples(modellist3)
+summary(results3)
+dotplot(results3) # highest Precision-Recall score when ntree=500, mtry=25
+```
+
+
+
+
+## Fitting a random forest. Grid search of optimal mtry. Downsampling CV. Maximize F. ##################################
+
+```{r}
+rf_model4 <- train(Legendary ~ .,
+    data = train_std,
+    method = "rf",
+    metric = "F",
+    tuneGrid = grid_rf,
+    trcontrol = train_control_4,
+    verbose = FALSE,
+    proximity = FALSE,
+    importance = TRUE
+)
+# summary of the model
+print(rf_model4)
+plot(rf_model4, main = "\n # Variable selection: Random Forest")
+```
+
+```{r}
+# feature importance
+ggplot(varImp(rf_model4), aes(
+    x = reorder(feature, Importance),
+    y = Importance
+)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    theme_classic() +
+    labs(
+        x     = "Feature",
+        y     = "Importance",
+        title = "Feature Importance: Random Forest (Downsampling cv)"
+    )
+## manually find the best ntree parameter
+tunegrid4 <- expand.grid(.mtry = 28)
+modellist4 <- list()
+
+# train with different ntree parameters
+for (ntree in c(500, 1500, 2500, 5000)) {
+    fit <- train(Legendary ~ .,
+        data = train_std,
+        method = "rf",
+        metric = "F",
+        tuneGrid = tunegrid4,
+        trControl = train_control_4,
+        ntree = ntree
+    )
+    key <- toString(ntree)
+    modellist4[[key]] <- fit
+}
+
+# Compare results
+results4 <- resamples(modellist4)
+summary(results4)
+dotplot(results4) # highest Precision-Recall score when ntree=1500, mtry=28
+```
+
+
+
+
+################################################################################
+## selection ###################################################################
+### on train ###################################################################
+## accuracy
+
+
+```{r}
+extract_best_accuracy <- function(fit) fit$results[which.max(fit$results$Accuracy), ]
+evaluation_rf_accuracy <- as.data.frame(rbind(
+    extract_best_accuracy(rf_model1),
+    extract_best_accuracy(rf_model2),
+    extract_best_accuracy(rf_model3),
+    extract_best_accuracy(rf_model4)
+))
+
+evaluation_rf_accuracy <- evaluation_rf_accuracy |>
+    select(-mtry, -Kappa, -AccuracySD, -KappaSD)
+rownames(evaluation_rf_accuracy) <- c("Default-Case", "SMOTE", "Up-sampling", "Down-Sampling")
+kable(evaluation_rf_accuracy)
+```
+
+
+## kappa
+
+
+```{r}
+extract_best_kappa <- function(fit) fit$results[which.max(fit$results$Kappa), ]
+evaluation_rf_kappa <- as.data.frame(rbind(
+    extract_best_kappa(rf_model1),
+    extract_best_kappa(rf_model2),
+    extract_best_kappa(rf_model3),
+    extract_best_kappa(rf_model4)
+))
+evaluation_rf_kappa <- evaluation_rf_kappa |>
+    select(-mtry, -Accuracy, -AccuracySD, -KappaSD)
+rownames(evaluation_rf_kappa) <- c("Default-Case", "SMOTE", "Up-sampling", "Down-Sampling")
+kable(evaluation_rf_kappa)
+```
+
+
+## on test #####################################################################
+
+```{r}
+rf_models <- list(rf_model1, rf_model2, rf_model3, rf_model4)
+# accuracy
+get_accuracy <- function(fit) {
+    y <- test_std$Legendary
+    y_hat <- predict(fit, type = "raw", newdata = test_std |>
+        select(-Legendary))
+    return(mean(y == y_hat))
+}
+
+test_accuracy_rf <- do.call(rbind, lapply(rf_models, get_accuracy))
+rownames(test_accuracy_rf) <- c("Default-Case", "SMOTE", "Up-sampling", "Down-Sampling")
+colnames(test_accuracy_rf) <- "Accuracy"
+kable(test_accuracy_rf) # Up-Sampling
+## kappa
+library(psych)
+get_kappa <- function(fit) {
+    y <- test_std$Legendary
+    y_hat <- predict(fit, type = "raw", newdata = test_std |>
+        select(-Legendary))
+    return(cohen.kappa(x = cbind(y, y_hat)))
+}
+test_kappa_rf <- do.call(rbind, lapply(rf_models, get_kappa))
+rownames(test_kappa_rf) <- c("Default-Case", "SMOTE", "Up-sampling", "Down-Sampling")
+kable(test_kappa_rf[, 1:2]) # Up-Sampling
+```
+
+
+
+
+

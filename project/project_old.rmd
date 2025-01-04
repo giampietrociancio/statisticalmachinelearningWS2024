@@ -1,0 +1,70 @@
+---
+title: "Pokemon Project"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}s
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+```
+
+## Data
+--- add description here
+
+## Feature extraction
+Import the df and visualize the columns' name.
+```{r}
+df <- read.csv("data.csv")
+names(df)
+```
+Drop useless columns X., Name.
+
+```{r}
+df <- df |>
+    mutate(Legendary = as.numeric(as.logical(Legendary))) |>
+    select(-X., -Name)
+```
+Check that Tot is just a linear combination of other columns. If yes, drop it.
+```{r}
+if (all((df$HP + df$Attack + df$Defense + df$SP..Attack + df$SP..Defense + df$Speed) == df$Total)) {
+    df <- df |> select(-Total)
+}
+```
+
+SKIP: Convert character to factors. If the factor column "x" is empty for some observation in the df, create a new indicator "has.x".
+```{r}
+for (col in colnames(df)) {
+    if (typeof(df[[col]]) == "character") {
+        i <- df[[col]] == ""
+        has_empty <- sum(i) > 0
+        df[col] <- as.factor(ifelse(i, "No", df[[col]]))
+        if (has_empty) {
+            df[col] <- relevel(df[[col]], "No")
+            new_col <- paste0("has.", col)
+            df[new_col] <- as.factor(!i)
+        }
+    }
+}
+```
+
+
+Hot-encoding from Type.1 and Type.2.
+
+```{r}
+unique_types <- c(df$Type.1, df$Type.1) |> unique()
+
+for (typ in unique_types[-1]) {
+    df[typ] <- 0
+    for (row in 1:nrow(df)) {
+        has_type <- typ %in% df[row, c("Type.1", "Type.2")]
+        if (has_type) {
+            df[row, typ] <- 1
+        }
+    }
+}
+```
+Drop the categorical columns,
+```{r}
+df <- df |> select(-Type.1, -Type.2)
+```

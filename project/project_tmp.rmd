@@ -1,0 +1,159 @@
+---
+title: "Pokemon Project"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+```
+
+## Data
+--- add description here
+
+## Feature extraction
+Import the df and visualize the columns' name.
+```{r}
+df <- read.csv("data.csv")
+names(df)
+```
+Drop useless columns X., Name.
+
+```{r}
+df <- df |>
+    mutate(Legendary = as.integer(as.logical(Legendary))) |>
+    select(-X., -Name)
+```
+Check that Tot is just a linear combination of other columns. If yes, drop it.
+```{r}
+if (all((df$HP + df$Attack + df$Defense + df$SP..Attack + df$SP..Defense + df$Speed) == df$Total)) {
+    df <- df |> select(-Total)
+}
+```
+
+Hot-encoding from Type.1 and Type.2.
+
+```{r}
+unique_types <- c(df$Type.1, df$Type.2) |> unique()
+
+for (typ in unique_types[-1]) {
+    if (typ == "") next
+    df[typ] <- 0
+    for (row in 1:nrow(df)) {
+        has_type <- typ %in% df[row, c("Type.1", "Type.2")]
+        if (has_type) {
+            df[row, typ] <- 1
+        }
+    }
+}
+```
+Encode Generation.
+```{r}
+for (i in unique(df$Generation)) {
+    if (i == 1) next
+    col_name <- paste0("gen_", i)
+    df[col_name] <- 0
+}
+
+for (row in 1:nrow(df)) {
+    gen <- df[row, "Generation"]
+    if (gen == 1) next
+    col_name <- paste0("gen_", gen)
+    df[row, col_name] <- 1
+}
+```
+Drop the categorical columns that we don't need anymore.
+```{r}
+df <- df |>
+    select(-Type.1, -Type.2, -Generation)
+```
+
+```{r}
+colnames(df)[c(1, 4, 5)] <- c("Hit_Point", "Special_Attack", "Special_Defense")
+```
+
+```{r}
+set.seed(123)
+train_test_split <- function(df, perc_train = 0.7) {
+    i_train <- sample(1:nrow(df), floor(0.7 * nrow(df)), F)
+    list_out <- list(train = df[i_train, ], test = df[-i_train, ])
+    return(list_out)
+}
+df_split <- train_test_split(df)
+```
+
+```{r}
+train <- df_split$train
+test <- df_split$test
+```
+
+```{r}
+numerical_vars <- names(train)[1:6]
+```
+Verify whether the prob of having Legendary is equal accross Generation to decide whether to keep the variable
+
+```{r}
+# train %>%
+#    group_by(Generation) %>%
+#    summarise(mean(Legendary))
+```
+
+
+Categorical data
+```{r}
+train %>%
+    select(-numerical_vars, -Legendary) %>%
+    colMeans() * 100 # Percentage values
+```
+
+```{r}
+# Numerical Variables
+train %>%
+    select(numerical_vars) %>%
+    summary()
+```
+
+```{r}
+par(mfrow = c(2, 4), mar = c(3, 3, 3, 3))
+lapply(numerical_vars, function(col_name) {
+    hist(train[[col_name]], main = paste("Histogram of", col_name), xlab = "variable")
+})
+par(mfrow = c(1, 1))
+```
+
+```{r}
+library(car)
+cor_mat <- cor(train[numerical_vars])
+print(cor_mat)
+corrplot(cor_mat, method = "square", type = "upper", tl.col = "black", tl.srt = 45)
+```
+
+- Create Train standrdized
+- Logistic stepwise for feature selection
+- Logistic Elastic for feature selection (standardization) 
+- Logistic Balanced (CV) (search for best imbalance method)
+
+```{r}
+train_std <- train
+train_std[numerical_vars] <- train |>
+    select(numerical_vars) |>
+    mutate(across(where(is.numeric), scale))
+```
+```{r}
+sapply(train_std, mean)
+```
+```{r}
+grid_ <- expand.grid(
+    .alpha = seq(0, 1, by = 0.1),
+    .lambda = seq(0, 1, by = 0.01)
+)
+logistic_elnet <- train(
+    as.factor(Legendary) ~ .,
+    data = train_std,
+    method = "glmnet",
+    family = "binomial",
+    metric = "Accuracy",
+    tuneGrid = grid_,
+)
+```
